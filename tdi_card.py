@@ -83,5 +83,13 @@ display:flex;align-items:center;justify-content:space-around;color:#f3e2b5;font-
 </body></html>"""
 with sync_playwright() as p:
     b = p.chromium.launch(); pg = b.new_page(viewport={"width":1080,"height":1350})
-    pg.set_content(page); pg.wait_for_timeout(400); pg.screenshot(path=out); b.close()
+    pg.set_content(page); pg.wait_for_timeout(300)
+    z = 1.0
+    while z > 0.62:
+        fits = pg.evaluate("() => document.querySelector('.src').getBoundingClientRect().bottom <= document.querySelector('.foot').getBoundingClientRect().top - 8 && document.querySelector('.ib').getBoundingClientRect().bottom <= document.querySelector('.src').getBoundingClientRect().top")
+        if fits: break
+        z -= 0.03
+        pg.evaluate(f"() => document.querySelectorAll('.panels,.strip,.ib').forEach(e => e.style.zoom = {z})")
+        pg.wait_for_timeout(50)
+    pg.screenshot(path=out); b.close()
 print(out)
