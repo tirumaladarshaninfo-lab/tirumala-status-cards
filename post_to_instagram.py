@@ -1,19 +1,16 @@
-"""Publish a local PNG to Instagram (feed post or story) via the Instagram API with Instagram Login.
+"""Publish a local image or video to Instagram (feed post, story or reel).
 
 Usage:
-  python3 post_to_instagram.py <image.png> <caption.txt> <feed|story>
-  python3 post_to_instagram.py --check       # verify token, print account + token expiry info
-  python3 post_to_instagram.py --refresh     # refresh the 60-day token, print the new one
+  python3 post_to_instagram.py <file> <caption.txt> <feed|story|reel>
+  python3 post_to_instagram.py --check
+  python3 post_to_instagram.py --refresh
 
-Env vars:
-  IG_TOKEN     Instagram user access token (IGAA...), needs instagram_business_content_publish
-  IG_USER_ID   Instagram account ID (17841...)
-  GH_REPO      owner/repo of the PUBLIC GitHub repo that hosts images
-  GH_CLONE     local clone path (default /home/claude/tirumala-status-cards)
-Needs network access to graph.instagram.com. Images are pushed with git, then
-fetched by Instagram from raw.githubusercontent.com.
+Env: IG_TOKEN, IG_USER_ID.
+The file is uploaded to Litterbox (litterbox.catbox.moe, auto-deletes after 12h) so
+Instagram can fetch it; needs network access to litterbox.catbox.moe, litter.catbox.moe
+and graph.instagram.com.
 """
-import datetime, json, os, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
+import json, os, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
 
 API = "https://graph.instagram.com/v23.0"
 token = os.environ["IG_TOKEN"]
@@ -22,16 +19,26 @@ token = os.environ["IG_TOKEN"]
 def call(method, path, base=API, **params):
     params["access_token"] = token
     data = urllib.parse.urlencode(params).encode()
-    if method == "GET":
-        req = urllib.request.Request(f"{base}/{path}?{data.decode()}")
-    else:
-        req = urllib.request.Request(f"{base}/{path}", data=data, method="POST")
+    req = (urllib.request.Request(f"{base}/{path}?{data.decode()}") if method == "GET"
+           else urllib.request.Request(f"{base}/{path}", data=data, method="POST"))
     try:
-        with urllib.request.urlopen(req, timeout=60) as r:
+        with urllib.request.urlopen(req, timeout=90) as r:
             return json.load(r)
     except urllib.error.HTTPError as e:
-        body = e.read().decode()[:500].replace(token, "[TOKEN]")
-        sys.exit(f"Instagram API error on {path}: {body}")
+        sys.exit(f"Instagram API error on {path}: {e.read().decode()[:500].replace(token, '[TOKEN]')}")
+
+
+def upload(path):
+    for attempt in range(3):
+        r = subprocess.run(["curl", "-sS", "--max-time", "120", "-F", "reqtype=fileupload", "-F", "time=12h",
+                            "-F", f"fileToUpload=@{path}",
+                            "https://litterbox.catbox.moe/resources/internals/api.php"],
+                           capture_output=True, text=True)
+        url = r.stdout.strip()
+        if url.startswith("https://"):
+            return url
+        time.sleep(5)
+    sys.exit(f"Image host upload failed: {r.stdout[:200]} {r.stderr[:200]}")
 
 
 if sys.argv[1] == "--check":
@@ -42,46 +49,29 @@ if sys.argv[1] == "--refresh":
     print(json.dumps({"access_token": r["access_token"], "expires_in_days": r.get("expires_in", 0) // 86400}))
     sys.exit(0)
 
-img, cap_file, mode = sys.argv[1], sys.argv[2], sys.argv[3]
-ig_user, repo = os.environ["IG_USER_ID"], os.environ["GH_REPO"]
+path, cap_file, mode = sys.argv[1], sys.argv[2], sys.argv[3]
+ig_user = os.environ["IG_USER_ID"]
+caption = open(cap_file).read().strip()
+url = upload(path)
+time.sleep(3)
 
-# 1. Host the image publicly on GitHub (unique name so caches never serve an old card)
-stamp = datetime.datetime.utcnow().strftime("%Y%m%d-%H%M%S")
-dest = f"posts/{stamp}-{mode}.png"
-clone = os.environ.get("GH_CLONE", "/home/claude/tirumala-status-cards")
-if not os.path.isdir(os.path.join(clone, ".git")):
-    subprocess.run(["git", "clone", "--depth", "1", f"https://github.com/{repo}", clone], check=True)
-git = lambda *a: subprocess.run(["git", "-C", clone, *a], check=True, capture_output=True, text=True).stdout.strip()
-git("pull", "--ff-only", "-q")
-os.makedirs(os.path.join(clone, "posts"), exist_ok=True)
-with open(img, "rb") as src, open(os.path.join(clone, dest), "wb") as out:
-    out.write(src.read())
-git("add", dest)
-git("-c", "user.name=tirumaladarshaninfo-lab",
-    "-c", "user.email=tirumaladarshaninfo-lab@users.noreply.github.com",
-    "commit", "-qm", f"Tirumala card {stamp}")
-git("push", "-q", "origin", "HEAD")
-branch = git("rev-parse", "--abbrev-ref", "HEAD")
-image_url = f"https://raw.githubusercontent.com/{repo}/{branch}/{dest}"
-time.sleep(8)  # let GitHub's raw CDN see the new file
-
-# 2. Create the media container
 if mode == "story":
-    c = call("POST", f"{ig_user}/media", image_url=image_url, media_type="STORIES")
+    key = "video_url" if path.lower().endswith(".mp4") else "image_url"
+    c = call("POST", f"{ig_user}/media", media_type="STORIES", **{key: url})
+elif mode == "reel":
+    c = call("POST", f"{ig_user}/media", media_type="REELS", video_url=url, caption=caption, share_to_feed="true")
 else:
-    c = call("POST", f"{ig_user}/media", image_url=image_url, caption=open(cap_file).read().strip())
+    c = call("POST", f"{ig_user}/media", image_url=url, caption=caption)
 cid = c["id"]
 
-# 3. Wait until Instagram has processed it
-for _ in range(20):
+for _ in range(60):
     s = call("GET", cid, fields="status_code").get("status_code")
     if s == "FINISHED":
         break
     if s in ("ERROR", "EXPIRED"):
         sys.exit(f"Container {cid} failed: {s}")
-    time.sleep(3)
+    time.sleep(5)
 
-# 4. Publish and report the link
 pid = call("POST", f"{ig_user}/media_publish", creation_id=cid)["id"]
 link = call("GET", pid, fields="permalink").get("permalink", "")
-print(json.dumps({"posted": mode, "media_id": pid, "permalink": link, "image_url": image_url}))
+print(json.dumps({"posted": mode, "media_id": pid, "permalink": link}))
