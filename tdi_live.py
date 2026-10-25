@@ -16,7 +16,7 @@ def fit(k, base, maxlen):
     v = str(d.get(k) or "")
     return base if len(v) <= maxlen else max(15, int(base * maxlen / len(v)))
 lvl = str(d.get("crowd", "")).lower()
-crowd_col = "#e0262b" if ("high" in lvl or "extreme" in lvl) else ("#e3a10b" if "moderate" in lvl else ("#2a9d4b" if "low" in lvl else "#777"))
+crowd_col = "#e8650c" if ("moderate" in lvl and "high" in lvl) else "#e0262b" if ("high" in lvl or "extreme" in lvl) else ("#e3a10b" if "moderate" in lvl else ("#2a9d4b" if "low" in lvl else "#777"))
 tr = str(d.get("trend", "")).lower()
 arrow = ('<span style="color:#e0262b">↗</span>' if "incr" in tr else '<span style="color:#3fbf63">↘</span>' if "decr" in tr else '<span style="color:#f3c75a">→</span>')
 sv = str(d.get("srivani_status", "")).lower()
